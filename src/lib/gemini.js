@@ -1,5 +1,21 @@
 // gemini.js - نفس منطق الإضافة الأصلية، منقول للويب بدون أي تغيير في الـ API نفسه.
 
+// شكل الـ JSON اللي المفروض الموديل يرجعه بالظبط (نفس الشكل الموصوف في formatInstructions.js).
+// بنبعته كـ responseSchema عشان جوجل تلتزم فعليًا بصيغة JSON صحيحة ومطابقة، بدل ما نعتمد
+// على تعليمات نصية بس (اللي ممكن الموديل ميلتزمش بيها 100% خصوصًا مع نصوص طويلة/متعددة الأسطر).
+const RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    status: { type: "STRING", enum: ["need_info", "ready"] },
+    understanding_percent: { type: "INTEGER" },
+    questions: { type: "ARRAY", items: { type: "STRING" } },
+    prompt: { type: "STRING" },
+    note: { type: "STRING" },
+  },
+  required: ["status", "understanding_percent", "questions", "prompt", "note"],
+  propertyOrdering: ["status", "understanding_percent", "questions", "prompt", "note"],
+};
+
 export async function callGemini({ apiKey, model, systemInstruction, contents }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
     model
@@ -12,7 +28,9 @@ export async function callGemini({ apiKey, model, systemInstruction, contents })
     contents,
     generationConfig: {
       responseMimeType: "application/json",
+      responseSchema: RESPONSE_SCHEMA,
       temperature: 0.4,
+      maxOutputTokens: 8192,
     },
   };
 
@@ -115,5 +133,30 @@ export function parseModelJSON(text) {
   // احتياط: لو الموديل حط code fences رغم التعليمات، نشيلها
   let cleaned = text.trim();
   cleaned = cleaned.replace(/^```json\s*/i, "").replace(/^```\s*/, "").replace(/```\s*$/, "");
-  return JSON.parse(cleaned);
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (firstError) {
+    // احتياط تاني: لو فيه أي نص زيادة قبل/بعد الـ JSON، نحاول نلاقي أول { ... }
+    // متكامل (بعدد أقواس متوازن) ونعمله parse لوحده.
+    const start = cleaned.indexOf("{");
+    if (start !== -1) {
+      let depth = 0;
+      for (let i = start; i < cleaned.length; i++) {
+        if (cleaned[i] === "{") depth++;
+        else if (cleaned[i] === "}") {
+          depth--;
+          if (depth === 0) {
+            const candidate = cleaned.slice(start, i + 1);
+            try {
+              return JSON.parse(candidate);
+            } catch {
+              break;
+            }
+          }
+        }
+      }
+    }
+    throw firstError;
+  }
 }
