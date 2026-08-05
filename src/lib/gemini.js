@@ -16,6 +16,17 @@ const RESPONSE_SCHEMA = {
   propertyOrdering: ["status", "understanding_percent", "questions", "prompt", "note"],
 };
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// أكواد الأخطاء المؤقتة من جوجل (الموديل مزنوق/محمّل دلوقتي) - يستاهل نعيد المحاولة
+// بنفس المفتاح بدل ما نفشل على طول، خصوصًا إن الطلبات الأطول (claude/gemini/gpt)
+// بتاخد وقت معالجة أطول من "general" فبتكون أكتر عرضة للـ 503 وقت الزحمة.
+const RETRYABLE_STATUSES = new Set([503, 500]);
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 1000;
+
 export async function callGemini({ apiKey, model, systemInstruction, contents }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
     model
@@ -34,33 +45,50 @@ export async function callGemini({ apiKey, model, systemInstruction, contents })
     },
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let lastErr = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
-  if (!res.ok) {
-    let detail = "";
-    try {
-      const errJson = await res.json();
-      detail = errJson?.error?.message || "";
-    } catch {
-      /* ignore */
+    if (!res.ok) {
+      let detail = "";
+      try {
+        const errJson = await res.json();
+        detail = errJson?.error?.message || "";
+      } catch {
+        /* ignore */
+      }
+      const err = new Error(`فشل الطلب (${res.status})${detail ? ": " + detail : ""}`);
+      err.status = res.status;
+
+      // لو خطأ 429 (حد الاستخدام) سيبه يتعامل معاه callGeminiWithKeys زي ما هو (تبديل مفتاح)
+      if (res.status === 429) {
+        throw err;
+      }
+
+      if (RETRYABLE_STATUSES.has(res.status) && attempt < MAX_RETRIES) {
+        lastErr = err;
+        await sleep(RETRY_BASE_DELAY_MS * Math.pow(2, attempt)); // 1s, 2s, 4s
+        continue;
+      }
+      throw err;
     }
-    const err = new Error(`فشل الطلب (${res.status})${detail ? ": " + detail : ""}`);
-    err.status = res.status;
-    throw err;
+
+    const data = await res.json();
+    const text =
+      data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
+    if (!text) {
+      const finishReason = data?.candidates?.[0]?.finishReason;
+      throw new Error("الموديل مرجعش رد نصي" + (finishReason ? ` (${finishReason})` : ""));
+    }
+    return text;
   }
 
-  const data = await res.json();
-  const text =
-    data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
-  if (!text) {
-    const finishReason = data?.candidates?.[0]?.finishReason;
-    throw new Error("الموديل مرجعش رد نصي" + (finishReason ? ` (${finishReason})` : ""));
-  }
-  return text;
+  // مستحيل نوصل هنا عمليًا، بس احتياط
+  throw lastErr || new Error("فشل الطلب بعد محاولات متكررة.");
 }
 
 // ---------- تبديل تلقائي بين أكتر من مفتاح ----------
